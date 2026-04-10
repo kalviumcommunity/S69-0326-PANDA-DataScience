@@ -27,8 +27,6 @@ This project uses the dataset:
   * Store & product details
   * External factors (weather, holidays, promotions)
 
-Such datasets are widely used for **time-series forecasting, inventory optimization, and retail analytics** ([Open Data Bay][2])
-
 ---
 
 ## 🎯 Objectives
