@@ -15,9 +15,9 @@ The goal of this project is to analyze inventory and sales data to:
 ## 📊 Dataset
 
 This project uses the dataset:
-👉 [Retail Store Inventory Forecasting Dataset](https://www.selectdataset.com/dataset/95a4b1fe05a5892d8e2ad0926859db14?utm_source=chatgpt.com)
+👉 [Retail Store Inventory Forecasting Dataset]([https://www.selectdataset.com/dataset/95a4b1fe05a5892d8e2ad0926859db14?utm_source=chatgpt.com](https://www.kaggle.com/datasets/anirudhchauhan/retail-store-inventory-forecasting-dataset))
 
-* Synthetic dataset designed for **inventory management & demand forecasting** ([遇见数据集][1])
+
 * Contains **daily records across multiple stores and products**
 * Includes key features like:
 
