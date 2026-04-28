@@ -7,19 +7,29 @@ DataFrame ready for modelling (forecasting, classification, clustering).
 
 from __future__ import annotations
 
+import logging
 from typing import List
 
 import numpy as np
 import pandas as pd
 from sklearn.preprocessing import LabelEncoder
 
+logger = logging.getLogger("retail_ml.features")
+
 
 def build_features(df: pd.DataFrame) -> pd.DataFrame:
     """Apply all feature-engineering steps and return a model-ready DataFrame.
 
-    Performs Phase 1 cleaning, temporal extraction, lag/rolling features,
-    business metrics, target flag creation, product speed labelling,
-    categorical encoding, and NaN cleanup.
+    Pipeline steps:
+      1. Clean — drop duplicates, impute missing, parse Date
+      2. Time features — day_of_week, month, week_of_year, quarter, is_weekend, is_month_end
+      3. Lag features — lag_1, lag_7, lag_14, lag_30 (grouped by Store ID + Product ID)
+      4. Rolling features — rolling_mean_7, rolling_mean_14, rolling_mean_30
+      5. Business features — sell_through_rate, stock_to_sales_ratio, etc.
+      6. Target flags — stockout_flag, overstock_flag
+      7. Product speed — quantile-based label (slow / medium / fast)
+      8. Encoding — label-encode IDs/Region, one-hot encode Category
+      9. Drop NaN rows produced by lag/rolling
 
     Args:
         df: Raw DataFrame loaded from retail_store_inventory.csv.
@@ -30,7 +40,7 @@ def build_features(df: pd.DataFrame) -> pd.DataFrame:
     df = df.copy()
 
     # ------------------------------------------------------------------
-    # STEP 1 — Re-apply Phase 1 cleaning
+    # STEP 1 — Cleaning
     # ------------------------------------------------------------------
     cols_to_drop: List[str] = ["Seasonality", "Weather Condition", "Holiday/Promotion"]
     existing_drop = [c for c in cols_to_drop if c in df.columns]
@@ -40,21 +50,21 @@ def build_features(df: pd.DataFrame) -> pd.DataFrame:
     df.dropna(inplace=True)
     df["Date"] = pd.to_datetime(df["Date"], errors="coerce")
     df.dropna(subset=["Date"], inplace=True)
-    print(f"[Step 1] Phase 1 cleaning done — {len(df):,} rows remain")
+    logger.info("Step 1 — Cleaning done: %s rows remain", f"{len(df):,}")
 
     # ------------------------------------------------------------------
     # STEP 2 — Temporal features
     # ------------------------------------------------------------------
     df["day_of_week"] = df["Date"].dt.dayofweek
-    df["week_of_year"] = df["Date"].dt.isocalendar().week.astype(int)
     df["month"] = df["Date"].dt.month
+    df["week_of_year"] = df["Date"].dt.isocalendar().week.astype(int)
     df["quarter"] = df["Date"].dt.quarter
     df["is_weekend"] = (df["day_of_week"] >= 5).astype(int)
     df["is_month_end"] = df["Date"].dt.is_month_end.astype(int)
-    print(f"[Step 2] Temporal features added: day_of_week … is_month_end")
+    logger.info("Step 2 — Temporal features added")
 
     # ------------------------------------------------------------------
-    # STEP 3 — Lag features (sort first)
+    # STEP 3 — Lag features (grouped by Store ID + Product ID)
     # ------------------------------------------------------------------
     df.sort_values(["Store ID", "Product ID", "Date"], inplace=True)
     df.reset_index(drop=True, inplace=True)
@@ -62,51 +72,53 @@ def build_features(df: pd.DataFrame) -> pd.DataFrame:
     group = df.groupby(["Store ID", "Product ID"])["Units Sold"]
     for lag in [1, 7, 14, 30]:
         df[f"lag_{lag}"] = group.shift(lag)
-    print(f"[Step 3] Lag features created: lag_1, lag_7, lag_14, lag_30")
+    logger.info("Step 3 — Lag features: lag_1, lag_7, lag_14, lag_30")
 
     # ------------------------------------------------------------------
     # STEP 4 — Rolling mean features
     # ------------------------------------------------------------------
     for window in [7, 14, 30]:
-        df[f"rolling_{window}"] = (
+        df[f"rolling_mean_{window}"] = (
             group.transform(lambda x: x.shift(1).rolling(window, min_periods=1).mean())
         )
-    print(f"[Step 4] Rolling features created: rolling_7, rolling_14, rolling_30")
+    logger.info("Step 4 — Rolling features: rolling_mean_7, rolling_mean_14, rolling_mean_30")
 
     # ------------------------------------------------------------------
-    # STEP 5 — Business metrics
+    # STEP 5 — Business features
     # ------------------------------------------------------------------
     df["sell_through_rate"] = (df["Units Sold"] / df["Inventory Level"]).clip(0, 1)
     df["stock_to_sales_ratio"] = df["Inventory Level"] / (df["Units Sold"] + 1)
-    df["days_of_supply"] = df["Inventory Level"] / (df["rolling_7"] + 1)
-    df["demand_forecast_error"] = df["Demand Forecast"] - df["Units Sold"]
+    df["days_of_supply"] = df["Inventory Level"] / (df["rolling_mean_7"] + 1)
     df["price_vs_competitor"] = df["Price"] - df["Competitor Pricing"]
     df["discount_flag"] = (df["Discount"] > 0).astype(int)
-    print(f"[Step 5] Business metrics computed (6 features)")
+    logger.info("Step 5 — Business features computed (5 features)")
 
     # ------------------------------------------------------------------
-    # STEP 6 — Target flag re-creation
+    # STEP 6 — Target flags
     # ------------------------------------------------------------------
+    # Stockout: units sold >= inventory level (demand met or exceeded supply)
     df["stockout_flag"] = (df["Units Sold"] >= df["Inventory Level"]).astype(int)
+    # Overstock: inventory significantly exceeds demand (threshold: 2x units sold)
     df["overstock_flag"] = (df["Inventory Level"] > df["Units Sold"] * 2).astype(int)
-    print(
-        f"[Step 6] Target flags — stockout_flag={df['stockout_flag'].sum():,}  "
-        f"overstock_flag={df['overstock_flag'].sum():,}"
+    logger.info(
+        "Step 6 — Target flags: stockout=%s, overstock=%s",
+        f"{df['stockout_flag'].sum():,}",
+        f"{df['overstock_flag'].sum():,}",
     )
 
     # ------------------------------------------------------------------
-    # STEP 7 — Product speed label
+    # STEP 7 — Product speed label (quantile-based)
     # ------------------------------------------------------------------
-    q25 = df["rolling_30"].quantile(0.25)
-    q75 = df["rolling_30"].quantile(0.75)
+    q25 = df["rolling_mean_30"].quantile(0.25)
+    q75 = df["rolling_mean_30"].quantile(0.75)
     df["product_speed"] = 1  # medium
-    df.loc[df["rolling_30"] > q75, "product_speed"] = 2  # fast
-    df.loc[df["rolling_30"] < q25, "product_speed"] = 0  # slow
-    print(
-        f"[Step 7] Product speed labels — "
-        f"fast={int((df['product_speed']==2).sum()):,}  "
-        f"medium={int((df['product_speed']==1).sum()):,}  "
-        f"slow={int((df['product_speed']==0).sum()):,}"
+    df.loc[df["rolling_mean_30"] > q75, "product_speed"] = 2   # fast
+    df.loc[df["rolling_mean_30"] < q25, "product_speed"] = 0   # slow
+    logger.info(
+        "Step 7 — Product speed: fast=%s, medium=%s, slow=%s",
+        int((df["product_speed"] == 2).sum()),
+        int((df["product_speed"] == 1).sum()),
+        int((df["product_speed"] == 0).sum()),
     )
 
     # ------------------------------------------------------------------
@@ -117,7 +129,7 @@ def build_features(df: pd.DataFrame) -> pd.DataFrame:
         df[col] = le.fit_transform(df[col].astype(str))
 
     df = pd.get_dummies(df, columns=["Category"], prefix="cat", dtype=int)
-    print(f"[Step 8] Encoding complete — shape {df.shape}")
+    logger.info("Step 8 — Encoding complete, shape=%s", df.shape)
 
     # ------------------------------------------------------------------
     # STEP 9 — Drop NaN rows from lags / rolling
@@ -125,7 +137,7 @@ def build_features(df: pd.DataFrame) -> pd.DataFrame:
     before = len(df)
     df.dropna(inplace=True)
     df.reset_index(drop=True, inplace=True)
-    print(f"[Step 9] Dropped {before - len(df):,} NaN rows — final shape {df.shape}")
+    logger.info("Step 9 — Dropped %s NaN rows, final shape=%s", f"{before - len(df):,}", df.shape)
 
     return df
 
@@ -134,9 +146,9 @@ def build_features(df: pd.DataFrame) -> pd.DataFrame:
 # CLI entry-point for quick testing
 # ---------------------------------------------------------------------------
 if __name__ == "__main__":
-    from utils import get_data_path
+    from src.utils import get_data_path, setup_logging
 
+    setup_logging()
     raw = pd.read_csv(get_data_path())
     engineered = build_features(raw)
-    print(f"\nFinal DataFrame: {engineered.shape[0]:,} rows × {engineered.shape[1]} cols")
-    print(engineered.head())
+    logger.info("Final DataFrame: %s rows × %s cols", f"{engineered.shape[0]:,}", engineered.shape[1])

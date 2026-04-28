@@ -169,7 +169,7 @@ main_html = f"""
   </section>
 """
 
-html_file_path = "website.html"
+html_file_path = "index.html"
 if os.path.exists(html_file_path):
     with open(html_file_path, 'r', encoding='utf-8') as f:
         html_content = f.read()

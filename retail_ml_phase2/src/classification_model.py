@@ -5,14 +5,12 @@ and product-speed prediction.
 
 from __future__ import annotations
 
+import logging
 from typing import Dict, List, Tuple
 
-import joblib
-import matplotlib
-matplotlib.use("Agg")
 import numpy as np
 import pandas as pd
-from sklearn.metrics import classification_report
+from sklearn.metrics import classification_report, f1_score
 from xgboost import XGBClassifier
 
 from src.evaluate import (
@@ -22,9 +20,9 @@ from src.evaluate import (
 from src.utils import (
     EXCLUDE_FROM_FEATURES,
     RANDOM_STATE,
-    ensure_dirs,
-    get_model_path,
-    get_plot_path,
+    save_model,
+    save_plot,
+    logger,
 )
 
 
@@ -35,15 +33,7 @@ from src.utils import (
 def _time_split(
     df: pd.DataFrame, days: int = 30
 ) -> Tuple[pd.DataFrame, pd.DataFrame]:
-    """Split DataFrame by time — last *days* become the test set.
-
-    Args:
-        df: Engineered DataFrame with a 'Date' column.
-        days: Number of trailing days for test.
-
-    Returns:
-        Tuple of (train_df, test_df).
-    """
+    """Split DataFrame by time — last *days* become the test set."""
     cutoff = df["Date"].max() - pd.Timedelta(days=days)
     train = df[df["Date"] < cutoff].copy()
     test = df[df["Date"] >= cutoff].copy()
@@ -51,19 +41,15 @@ def _time_split(
 
 
 def _feature_cols(df: pd.DataFrame) -> List[str]:
-    """Return numeric feature columns excluding targets.
-
-    Args:
-        df: Engineered DataFrame.
-
-    Returns:
-        list[str]: Feature column names.
-    """
+    """Return numeric feature columns excluding targets."""
     return [
         c
         for c in df.columns
         if c not in EXCLUDE_FROM_FEATURES
-        and df[c].dtype in [np.float64, np.int64, np.int32, np.float32, np.uint8, int, float]
+        and df[c].dtype in [
+            np.float64, np.int64, np.int32, np.float32, np.uint8, int, float,
+            "float64", "int64", "int32", "float32", "uint8"
+        ]
     ]
 
 
@@ -72,21 +58,9 @@ def _feature_cols(df: pd.DataFrame) -> List[str]:
 # ===================================================================
 
 def train_stockout_classifier(df: pd.DataFrame) -> Dict[str, float]:
-    """Train an XGBoost classifier for stockout prediction.
-
-    Handles class imbalance via scale_pos_weight.
-
-    Args:
-        df: Engineered DataFrame with 'stockout_flag' column.
-
-    Returns:
-        dict: Classification metrics dictionary.
-    """
-    ensure_dirs()
-    print("\n" + "=" * 60)
-    print("  STOCKOUT CLASSIFICATION")
-    print("=" * 60)
-
+    """Train an XGBoost classifier for stockout prediction."""
+    logger.info("Starting stockout classification training...")
+    
     train, test = _time_split(df)
     feats = _feature_cols(df)
 
@@ -99,7 +73,7 @@ def train_stockout_classifier(df: pd.DataFrame) -> Dict[str, float]:
     neg = int((y_train == 0).sum())
     pos = max(int((y_train == 1).sum()), 1)
     spw = neg / pos
-    print(f"[stockout] Train pos={pos:,}  neg={neg:,}  scale_pos_weight={spw:.2f}")
+    logger.info("Stockout Split: Pos=%d, Neg=%d, scale_pos_weight=%.2f", pos, neg, spw)
 
     model = XGBClassifier(
         n_estimators=300,
@@ -116,12 +90,19 @@ def train_stockout_classifier(df: pd.DataFrame) -> Dict[str, float]:
     probs = model.predict_proba(X_test)[:, 1]
 
     metrics = classification_metrics(y_test, preds, probs)
-    print(f"\n[stockout] Metrics: {metrics}")
-    print("\n" + classification_report(y_test, preds, zero_division=0))
+    logger.info("Stockout Metrics: %s", metrics)
 
-    path = str(get_model_path("stockout_classifier.joblib"))
-    joblib.dump(model, path)
-    print(f"[stockout] Model saved → {path}")
+    # Save model
+    save_model(model, "stockout_classifier.joblib")
+
+    # Confusion matrix
+    fig_cm = plot_confusion_matrix(
+        y_test,
+        preds,
+        labels=["No Stockout", "Stockout"],
+        title="Stockout Confusion Matrix",
+    )
+    save_plot(fig_cm, "stockout_confusion.png")
 
     return metrics
 
@@ -131,20 +112,8 @@ def train_stockout_classifier(df: pd.DataFrame) -> Dict[str, float]:
 # ===================================================================
 
 def train_overstock_classifier(df: pd.DataFrame) -> Dict[str, float]:
-    """Train an XGBoost classifier for overstock prediction.
-
-    Class is roughly balanced (~50 %), so no scale_pos_weight needed.
-
-    Args:
-        df: Engineered DataFrame with 'overstock_flag' column.
-
-    Returns:
-        dict: Classification metrics dictionary.
-    """
-    ensure_dirs()
-    print("\n" + "=" * 60)
-    print("  OVERSTOCK CLASSIFICATION")
-    print("=" * 60)
+    """Train an XGBoost classifier for overstock prediction."""
+    logger.info("Starting overstock classification training...")
 
     train, test = _time_split(df)
     feats = _feature_cols(df)
@@ -154,11 +123,16 @@ def train_overstock_classifier(df: pd.DataFrame) -> Dict[str, float]:
     X_test = test[feats].values
     y_test = test["overstock_flag"].values
 
-    print(f"[overstock] Train pos={int((y_train==1).sum()):,}  neg={int((y_train==0).sum()):,}")
+    # Handle imbalance
+    neg = int((y_train == 0).sum())
+    pos = max(int((y_train == 1).sum()), 1)
+    spw = neg / pos
+    logger.info("Overstock Split: Pos=%d, Neg=%d, scale_pos_weight=%.2f", pos, neg, spw)
 
     model = XGBClassifier(
         n_estimators=300,
         learning_rate=0.05,
+        scale_pos_weight=spw,
         random_state=RANDOM_STATE,
         use_label_encoder=False,
         eval_metric="logloss",
@@ -170,21 +144,19 @@ def train_overstock_classifier(df: pd.DataFrame) -> Dict[str, float]:
     probs = model.predict_proba(X_test)[:, 1]
 
     metrics = classification_metrics(y_test, preds, probs)
-    print(f"\n[overstock] Metrics: {metrics}")
-    print("\n" + classification_report(y_test, preds, zero_division=0))
+    logger.info("Overstock Metrics: %s", metrics)
+
+    # Save model
+    save_model(model, "overstock_classifier.joblib")
 
     # Confusion matrix
-    plot_confusion_matrix(
+    fig_cm = plot_confusion_matrix(
         y_test,
         preds,
         labels=["No Overstock", "Overstock"],
-        save_path=str(get_plot_path("overstock_confusion.png")),
         title="Overstock Confusion Matrix",
     )
-
-    path = str(get_model_path("overstock_classifier.joblib"))
-    joblib.dump(model, path)
-    print(f"[overstock] Model saved → {path}")
+    save_plot(fig_cm, "overstock_confusion.png")
 
     return metrics
 
@@ -194,20 +166,8 @@ def train_overstock_classifier(df: pd.DataFrame) -> Dict[str, float]:
 # ===================================================================
 
 def train_product_speed_classifier(df: pd.DataFrame) -> Dict[str, float]:
-    """Train an XGBoost multiclass classifier for product speed.
-
-    Labels: 0=slow, 1=medium, 2=fast.
-
-    Args:
-        df: Engineered DataFrame with 'product_speed' column.
-
-    Returns:
-        dict: {'macro_f1': float} plus per-class report.
-    """
-    ensure_dirs()
-    print("\n" + "=" * 60)
-    print("  PRODUCT SPEED CLASSIFICATION")
-    print("=" * 60)
+    """Train an XGBoost multiclass classifier for product speed."""
+    logger.info("Starting product speed classification training...")
 
     train, test = _time_split(df)
     feats = _feature_cols(df)
@@ -217,11 +177,11 @@ def train_product_speed_classifier(df: pd.DataFrame) -> Dict[str, float]:
     X_test = test[feats].values
     y_test = test["product_speed"].values
 
-    print(
-        f"[speed] Class distribution (train): "
-        f"slow={int((y_train==0).sum()):,}  "
-        f"medium={int((y_train==1).sum()):,}  "
-        f"fast={int((y_train==2).sum()):,}"
+    logger.info(
+        "Product Speed distribution (train): slow=%d, medium=%d, fast=%d",
+        int((y_train == 0).sum()),
+        int((y_train == 1).sum()),
+        int((y_train == 2).sum()),
     )
 
     model = XGBClassifier(
@@ -237,37 +197,33 @@ def train_product_speed_classifier(df: pd.DataFrame) -> Dict[str, float]:
     model.fit(X_train, y_train)
 
     preds = model.predict(X_test)
-    from sklearn.metrics import f1_score
+    
+    macro_f = round(f1_score(y_test, preds, average="macro", zero_division=0), 4)
+    logger.info("Product Speed Macro F1 = %.4f", macro_f)
 
-    macro_f1 = round(f1_score(y_test, preds, average="macro", zero_division=0), 4)
-    print(f"\n[speed] Macro F1 = {macro_f1}")
-    print("\n" + classification_report(y_test, preds, target_names=["slow", "medium", "fast"], zero_division=0))
+    # Save model
+    save_model(model, "product_speed_classifier.joblib")
 
     # Confusion matrix
-    plot_confusion_matrix(
+    fig_cm = plot_confusion_matrix(
         y_test,
         preds,
         labels=["slow", "medium", "fast"],
-        save_path=str(get_plot_path("speed_confusion.png")),
         title="Product Speed Confusion Matrix",
     )
+    save_plot(fig_cm, "speed_confusion.png")
 
-    path = str(get_model_path("product_speed_classifier.joblib"))
-    joblib.dump(model, path)
-    print(f"[speed] Model saved → {path}")
-
-    return {"macro_f1": macro_f1}
+    return {"macro_f1": macro_f}
 
 
 # ---------------------------------------------------------------------------
 # CLI entry-point
 # ---------------------------------------------------------------------------
 if __name__ == "__main__":
-    import sys, os
-    sys.path.insert(0, os.path.join(os.path.dirname(__file__), ".."))
     from src.feature_engineering import build_features
-    from src.utils import get_data_path
+    from src.utils import get_data_path, setup_logging
 
+    setup_logging()
     raw = pd.read_csv(get_data_path())
     df = build_features(raw)
     train_stockout_classifier(df)

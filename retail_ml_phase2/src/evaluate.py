@@ -5,6 +5,7 @@ SHAP analysis, and visualisation.
 
 from __future__ import annotations
 
+import logging
 from typing import Dict, List, Optional
 
 import matplotlib
@@ -14,7 +15,6 @@ import numpy as np
 import shap
 from sklearn.metrics import (
     accuracy_score,
-    classification_report,
     confusion_matrix,
     f1_score,
     mean_absolute_error,
@@ -24,6 +24,7 @@ from sklearn.metrics import (
     roc_auc_score,
 )
 
+from src.utils import logger
 
 # ---------------------------------------------------------------------------
 # Regression helpers
@@ -69,7 +70,7 @@ def classification_metrics(
     metrics: Dict[str, float] = {
         "Accuracy": round(accuracy_score(y_true, y_pred), 4),
         "Precision": round(precision_score(y_true, y_pred, zero_division=0), 4),
-        "Recall": round(recall_score(y_true, y_pred, zero_division=0), 4),
+                "Recall": round(recall_score(y_true, y_pred, zero_division=0), 4),
         "F1": round(f1_score(y_true, y_pred, zero_division=0), 4),
     }
     if y_prob is not None:
@@ -88,51 +89,51 @@ def plot_actual_vs_predicted(
     y_true: np.ndarray,
     y_pred: np.ndarray,
     title: str = "Actual vs Predicted",
-    save_path: Optional[str] = None,
-) -> None:
-    """Scatter plot of actual vs predicted values with identity line.
+) -> plt.Figure:
+    """Generate scatter plot of actual vs predicted values with identity line.
 
     Args:
         y_true: True target values.
         y_pred: Predicted values.
         title: Plot title.
-        save_path: If provided, save figure to this path.
+
+    Returns:
+        plt.Figure: Matplotlib Figure object.
     """
     fig, ax = plt.subplots(figsize=(8, 6))
     ax.scatter(y_true, y_pred, alpha=0.3, s=10, color="#4f46e5")
-    mn, mx = min(y_true.min(), y_pred.min()), max(y_true.max(), y_pred.max())
+    mn = min(y_true.min(), y_pred.min())
+    mx = max(y_true.max(), y_pred.max())
     ax.plot([mn, mx], [mn, mx], "r--", linewidth=1.5, label="Perfect prediction")
     ax.set_xlabel("Actual")
     ax.set_ylabel("Predicted")
     ax.set_title(title)
     ax.legend()
     fig.tight_layout()
-    if save_path:
-        fig.savefig(save_path, dpi=150)
-        print(f"[evaluate] Plot saved → {save_path}")
-    plt.close(fig)
+    return fig
 
 
 def plot_shap_summary(
     model: object,
     X_test: np.ndarray,
     feature_names: List[str],
-    save_path: Optional[str] = None,
     max_display: int = 15,
-) -> None:
-    """Generate and optionally save a SHAP beeswarm summary plot.
+) -> plt.Figure:
+    """Generate a SHAP beeswarm summary plot.
 
     Args:
         model: Trained tree-based model (XGBoost, LightGBM, etc.).
-        X_test: Test feature matrix (numpy array or DataFrame).
-        feature_names: List of feature names matching columns.
-        save_path: If provided, save figure to this path.
+        X_test: Test feature matrix.
+        feature_names: List of feature names.
         max_display: Number of top features to display.
+
+    Returns:
+        plt.Figure: Matplotlib Figure object.
     """
     explainer = shap.TreeExplainer(model)
     shap_values = explainer.shap_values(X_test)
 
-    fig, ax = plt.subplots(figsize=(10, 7))
+    fig = plt.figure(figsize=(10, 7))
     shap.summary_plot(
         shap_values,
         X_test,
@@ -141,27 +142,25 @@ def plot_shap_summary(
         show=False,
     )
     plt.tight_layout()
-    if save_path:
-        plt.savefig(save_path, dpi=150, bbox_inches="tight")
-        print(f"[evaluate] SHAP plot saved → {save_path}")
-    plt.close("all")
+    return fig
 
 
 def plot_confusion_matrix(
     y_true: np.ndarray,
     y_pred: np.ndarray,
     labels: List[str],
-    save_path: Optional[str] = None,
     title: str = "Confusion Matrix",
-) -> None:
-    """Plot and optionally save a confusion matrix heatmap.
+) -> plt.Figure:
+    """Generate a confusion matrix heatmap.
 
     Args:
         y_true: True labels.
         y_pred: Predicted labels.
-        labels: List of class label names for axis ticks.
-        save_path: If provided, save figure to this path.
+        labels: List of class label names.
         title: Plot title.
+
+    Returns:
+        plt.Figure: Matplotlib Figure object.
     """
     cm = confusion_matrix(y_true, y_pred)
     fig, ax = plt.subplots(figsize=(6, 5))
@@ -189,7 +188,4 @@ def plot_confusion_matrix(
                 color="white" if cm[i, j] > thresh else "black",
             )
     fig.tight_layout()
-    if save_path:
-        fig.savefig(save_path, dpi=150)
-        print(f"[evaluate] Confusion matrix saved → {save_path}")
-    plt.close(fig)
+    return fig

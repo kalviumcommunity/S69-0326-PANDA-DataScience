@@ -8,11 +8,9 @@ saves the best model plus diagnostic plots.
 
 from __future__ import annotations
 
+import logging
 from typing import Dict, List, Tuple
 
-import joblib
-import matplotlib
-matplotlib.use("Agg")
 import numpy as np
 import pandas as pd
 from sklearn.linear_model import LinearRegression
@@ -27,9 +25,9 @@ from src.evaluate import (
 from src.utils import (
     EXCLUDE_FROM_FEATURES,
     RANDOM_STATE,
-    get_model_path,
-    get_plot_path,
-    ensure_dirs,
+    save_model,
+    save_plot,
+    logger,
 )
 
 
@@ -48,7 +46,12 @@ def _time_split(
     cutoff = df["Date"].max() - pd.Timedelta(days=days)
     train = df[df["Date"] < cutoff].copy()
     test = df[df["Date"] >= cutoff].copy()
-    print(f"[split] Train: {len(train):,} rows  |  Test: {len(test):,} rows  |  Cutoff: {cutoff.date()}")
+    logger.info(
+        "Split: Train=%s rows, Test=%s rows, Cutoff=%s",
+        f"{len(train):,}",
+        f"{len(test):,}",
+        cutoff.date(),
+    )
     return train, test
 
 
@@ -64,7 +67,11 @@ def _get_feature_cols(df: pd.DataFrame) -> List[str]:
     return [
         c
         for c in df.columns
-        if c not in EXCLUDE_FROM_FEATURES and df[c].dtype in [np.float64, np.int64, np.int32, np.float32, np.uint8, int, float]
+        if c not in EXCLUDE_FROM_FEATURES
+        and df[c].dtype in [
+            np.float64, np.int64, np.int32, np.float32, np.uint8, int, float,
+            "float64", "int64", "int32", "float32", "uint8"
+        ]
     ]
 
 
@@ -77,14 +84,11 @@ def train_forecast_model(df: pd.DataFrame) -> Dict[str, Dict[str, float]]:
     Returns:
         dict: Model name → metrics dict.
     """
-    ensure_dirs()
-    print("\n" + "=" * 60)
-    print("  DEMAND FORECASTING")
-    print("=" * 60)
+    logger.info("Starting demand forecasting training...")
 
     train, test = _time_split(df)
     feature_cols = _get_feature_cols(df)
-    print(f"[forecast] Using {len(feature_cols)} features")
+    logger.info("Using %d features for forecasting", len(feature_cols))
 
     X_train = train[feature_cols].values
     y_train = train["Units Sold"].values
@@ -112,48 +116,39 @@ def train_forecast_model(df: pd.DataFrame) -> Dict[str, Dict[str, float]]:
     trained_models = {}
 
     for name, model in models.items():
-        print(f"\n[forecast] Training {name} …")
+        logger.info("Training %s...", name)
         model.fit(X_train, y_train)
         preds = model.predict(X_test)
         metrics = regression_metrics(y_test, preds)
         results[name] = metrics
         trained_models[name] = (model, preds)
-        print(f"  MAE={metrics['MAE']}  RMSE={metrics['RMSE']}  MAPE={metrics['MAPE']}%")
-
-    # ----- Comparison table -----
-    print("\n" + "-" * 50)
-    print(f"{'Model':<20} {'MAE':>8} {'RMSE':>8} {'MAPE':>8}")
-    print("-" * 50)
-    for name, m in results.items():
-        print(f"{name:<20} {m['MAE']:>8.2f} {m['RMSE']:>8.2f} {m['MAPE']:>7.2f}%")
-    print("-" * 50)
+        logger.info("  %s Metrics: %s", name, metrics)
 
     # ----- Best model (lowest RMSE) -----
     best_name = min(results, key=lambda k: results[k]["RMSE"])
     best_model, best_preds = trained_models[best_name]
-    print(f"\n[forecast] Best model → {best_name} (RMSE={results[best_name]['RMSE']})")
+    logger.info("Best model: %s (RMSE=%s)", best_name, results[best_name]["RMSE"])
 
-    model_path = str(get_model_path("best_forecast_model.joblib"))
-    joblib.dump(best_model, model_path)
-    print(f"[forecast] Model saved → {model_path}")
+    # Save model and features list
+    save_model(best_model, "best_forecast_model.joblib")
+    save_model(feature_cols, "forecasting_features.joblib")
 
     # ----- Actual vs Predicted plot -----
-    plot_actual_vs_predicted(
+    fig_avp = plot_actual_vs_predicted(
         y_test,
         best_preds,
         title=f"Forecast: Actual vs Predicted ({best_name})",
-        save_path=str(get_plot_path("forecast_vs_actual.png")),
     )
+    save_plot(fig_avp, "forecast_vs_actual.png")
 
     # ----- SHAP for XGBoost -----
     xgb_model = trained_models["XGBoost"][0]
-    plot_shap_summary(
+    fig_shap = plot_shap_summary(
         xgb_model,
         X_test,
         feature_names=feature_cols,
-        save_path=str(get_plot_path("shap_feature_importance.png")),
-        max_display=15,
     )
+    save_plot(fig_shap, "shap_feature_importance.png")
 
     return results
 
@@ -162,11 +157,10 @@ def train_forecast_model(df: pd.DataFrame) -> Dict[str, Dict[str, float]]:
 # CLI entry-point
 # ---------------------------------------------------------------------------
 if __name__ == "__main__":
-    import sys, os
-    sys.path.insert(0, os.path.join(os.path.dirname(__file__), ".."))
     from src.feature_engineering import build_features
-    from src.utils import get_data_path
+    from src.utils import get_data_path, setup_logging
 
+    setup_logging()
     raw = pd.read_csv(get_data_path())
     df = build_features(raw)
     train_forecast_model(df)
